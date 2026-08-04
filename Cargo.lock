@@ -2930,14 +2930,14 @@ version = "0.0.0"
 dependencies = [
  "aeronet",
  "aeronet_replicon",
- "aeronet_websocket",
- "aeronet_webtransport",
+ "aeronet_steam",
  "bevy",
  "bevy_egui",
  "bevy_replicon",
  "cfg-if",
  "clap",
  "serde",
+ "steamworks",
 ]
 
 [[package]]

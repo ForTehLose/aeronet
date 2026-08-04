@@ -3,15 +3,16 @@
 //!
 //! This example shows you how to create a client, establish a connection to a
 //! server, and send and receive messages. This example uses:
-//! - `aeronet_websocket` as the IO layer, using WebSockets under the hood. This
-//!   is what actually sends packets of `[u8]`s across the network.
+//! - `aeronet_steam` as the IO layer, using Steam networking sockets under the
+//!   hood. This is what actually sends packets of `[u8]`s across the network.
 //! - `aeronet_transport` as the transport layer, the default implementation.
 //!   This manages reliability, ordering, and fragmentation of packets - meaning
 //!   that all you have to worry about is the actual data payloads that you want
 //!   to send.
 //!
-//! This example only works on native due to certificate validation, but the
-//! general ideas are the same on WASM.
+//! This example requires Steam to be running, and uses the Spacewar test app
+//! ID (`480`), so it should work without owning any particular game. It only
+//! works natively, since `aeronet_steam` does not support WASM.
 
 use {
     aeronet::{
@@ -25,26 +26,43 @@ use {
             lane::{LaneIndex, LaneKind},
         },
     },
-    aeronet_websocket::client::{ClientConfig, WebSocketClient, WebSocketClientPlugin},
+    aeronet_steam::{
+        SessionConfig, SteamworksClient, SteamworksSockets,
+        client::{SteamNetClient, SteamNetClientPlugin},
+    },
     bevy::prelude::*,
     bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui},
-    core::mem,
+    core::{mem, net::SocketAddr},
 };
 
 // Let's set up the app.
 
 fn main() -> AppExit {
+    // Steam must be running, and we identify ourselves with an app ID.
+    // `480` is Valve's public Spacewar test app, usable for testing without
+    // owning a specific game on Steam.
+    let steam = steamworks::Client::init_app(480).expect("failed to initialize steam");
+    steam.networking_utils().init_relay_network_access();
+
+    let socket_provider = SteamworksSockets::Client(SteamworksClient(steam.clone()));
+
     App::new()
+        .insert_resource(SteamworksClient(steam))
+        .insert_resource(socket_provider)
+        // Steam callbacks must be pumped every frame for the IO layer to work.
+        .add_systems(PreUpdate, |steam: Res<SteamworksClient>| {
+            steam.run_callbacks();
+        })
         .add_plugins((
             DefaultPlugins,
             // We'll use `bevy_egui` for displaying the UI.
             EguiPlugin::default(),
-            // We're using WebSockets, so we add this plugin.
+            // We're using Steam networking sockets, so we add this plugin.
             // This will automatically add `AeronetIoPlugin` as well, which sets
             // up the IO layer. However, it does *not* set up the transport
             // layer (since technically, you may want to swap it out and use
             // your own).
-            WebSocketClientPlugin,
+            SteamNetClientPlugin,
             // Here we actually set up the transport layer.
             AeronetTransportPlugin,
         ))
@@ -66,12 +84,8 @@ struct UiState {
     log: Vec<String>,
 }
 
-// Default URL that we'll be connecting to.
-// Note the `wss` - the demo server use encryption to demonstrate best practices
-// so we use a secure WebSocket connection to connect to it.
-// You should always use encryption, unless you're testing something, in which
-// case you can use `ws`.
-const DEFAULT_TARGET: &str = "wss://127.0.0.1:25570";
+// Default address that we'll be connecting to.
+const DEFAULT_TARGET: &str = "127.0.0.1:25572";
 
 // Define what `aeronet_transport` lanes will be used on this connection.
 // When using the transport layer, you must define in advance what lanes will be
@@ -92,27 +106,12 @@ fn setup_ui(mut commands: Commands) {
 }
 
 fn setup_connection(mut commands: Commands) {
-    // Let's start a connection to a WebSocket server.
+    // Let's start a connection to a Steam networking sockets server.
 
     // First, make the configuration.
-    // This changes depending on if you're on WASM or native.
-    let config = {
-        #[cfg(target_family = "wasm")]
-        {
-            ClientConfig
-        }
-        #[cfg(not(target_family = "wasm"))]
-        {
-            // Since our demo server uses self-signed certificates, we need to
-            // explicitly configure the client to accept those certificates.
-            // We can do this by disabling certificate validation entirely, but in
-            // production you should use the default certificate validation, and
-            // generate real certificates using a root CA.
-            ClientConfig::builder().with_no_cert_validation()
-        }
-    };
-    // And define what URL we want to connect to.
-    let target = DEFAULT_TARGET;
+    let config = SessionConfig::default();
+    // And define what address we want to connect to.
+    let target: SocketAddr = DEFAULT_TARGET.parse().expect("should be a valid address");
 
     // Spawn an entity to represent this session.
     let mut entity = commands.spawn((
@@ -133,7 +132,7 @@ fn setup_connection(mut commands: Commands) {
     ));
     // Make an `EntityCommand` via `connect`, which will set up this
     // session, and push that command onto the entity.
-    entity.queue(WebSocketClient::connect(config, target));
+    entity.queue(SteamNetClient::connect(config, target));
 }
 
 // Observe state change events using `Trigger`s.

@@ -14,18 +14,25 @@ use {
         server::Server,
     },
     aeronet_replicon::server::{AeronetRepliconServer, AeronetRepliconServerPlugin},
-    aeronet_websocket::server::{WebSocketServer, WebSocketServerPlugin},
-    aeronet_webtransport::{
-        cert,
-        server::{SessionRequest, SessionResponse, WebTransportServer, WebTransportServerPlugin},
-        wtransport,
+    aeronet_steam::{
+        SessionConfig, SteamworksClient, SteamworksServer, SteamworksSockets,
+        dedicated_server::{
+            ListenTarget, SessionRequest, SessionResponse, SteamNetDedicatedServer,
+            SteamNetDedicatedServerPlugin,
+        },
     },
-    bevy::{ecs::schedule::ScheduleLabel, app::ScheduleRunnerPlugin, log::LogPlugin, prelude::*, state::app::StatesPlugin},
+    bevy::{
+        app::ScheduleRunnerPlugin, ecs::schedule::ScheduleLabel, log::LogPlugin, prelude::*,
+        state::app::StatesPlugin,
+    },
     bevy_replicon::prelude::*,
-    core::time::Duration,
+    core::{
+        net::{Ipv4Addr, SocketAddr},
+        time::Duration,
+    },
     examples::move_box::{
-        MoveBoxPlugin, Player, PlayerColor, PlayerInput, PlayerPosition, TICK_RATE,
-        WEB_SOCKET_PORT, WEB_TRANSPORT_PORT,
+        MoveBoxPlugin, Player, PlayerColor, PlayerInput, PlayerPosition, STEAM_GAME_PORT,
+        STEAM_QUERY_PORT, TICK_RATE,
     },
     std::time::SystemTime,
 };
@@ -33,23 +40,52 @@ use {
 /// `move_box` demo server
 #[derive(Debug, Resource, clap::Parser)]
 struct Args {
-    /// Port to listen for WebTransport connections on
-    #[arg(long, default_value_t = WEB_TRANSPORT_PORT)]
-    wt_port: u16,
-    /// Port to listen for WebSocket connections on
-    #[arg(long, default_value_t = WEB_SOCKET_PORT)]
-    ws_port: u16,
-}
-
-impl FromWorld for Args {
-    fn from_world(_: &mut World) -> Self {
-        <Self as clap::Parser>::parse()
-    }
+    /// Port to listen for Steam game connections on
+    #[arg(long, default_value_t = STEAM_GAME_PORT)]
+    game_port: u16,
+    /// Port used for Steam master server queries
+    #[arg(long, default_value_t = STEAM_QUERY_PORT)]
+    query_port: u16,
 }
 
 fn main() -> AppExit {
+    let args = <Args as clap::Parser>::parse();
+
+    let (server, server_callbacks) = steamworks::Server::init(
+        Ipv4Addr::UNSPECIFIED,
+        args.game_port,
+        args.query_port,
+        steamworks::ServerMode::Authentication,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .expect("failed to initialize steam server");
+
+    server.set_product("aeronet-move-box");
+    server.set_game_description("aeronet move_box example");
+    server.set_map_name("move_box");
+    server.set_max_players(16);
+    server.set_server_name("aeronet move_box server");
+    server.set_dedicated_server(true);
+    server.log_on_anonymous();
+    server.enable_heartbeats(true);
+
+    server_callbacks
+        .networking_utils()
+        .init_relay_network_access();
+
+    let steam_id = server.steam_id();
+    info!("Steam server ID: {steam_id:?}");
+
+    let socket_provider = SteamworksSockets::Server(SteamworksServer(server.clone()));
+
     App::new()
-        .init_resource::<Args>()
+        .insert_resource(args)
+        .insert_resource(SteamworksServer(server))
+        .insert_resource(SteamworksClient(server_callbacks))
+        .insert_resource(socket_provider)
+        .add_systems(PreUpdate, |steam: Res<SteamworksClient>| {
+            steam.run_callbacks();
+        })
         .add_plugins((
             // core
             LogPlugin::default(),
@@ -58,8 +94,7 @@ fn main() -> AppExit {
             ))),
             StatesPlugin,
             // transport
-            WebTransportServerPlugin,
-            WebSocketServerPlugin,
+            SteamNetDedicatedServerPlugin,
             // replication
             RepliconPlugins.set(ServerPlugin {
                 // 1 frame lasts `1.0 / TICK_RATE` anyway
@@ -70,7 +105,7 @@ fn main() -> AppExit {
             // game
             MoveBoxPlugin,
         ))
-        .add_systems(Startup, (open_web_transport_server, open_web_socket_server))
+        .add_systems(Startup, open_server)
         .add_observer(on_opened)
         .add_observer(on_session_request)
         .add_observer(on_connected)
@@ -78,48 +113,33 @@ fn main() -> AppExit {
         .run()
 }
 
-//
-// WebTransport
-//
+fn open_server(mut commands: Commands, args: Res<Args>) {
+    let target = ListenTarget::Addr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), args.game_port));
 
-fn open_web_transport_server(mut commands: Commands, args: Res<Args>) {
-    let identity = wtransport::Identity::self_signed(["localhost", "127.0.0.1", "::1"])
-        .expect("all given SANs should be valid DNS names");
-    let cert = &identity.certificate_chain().as_slice()[0];
-    let spki_fingerprint = cert::spki_fingerprint_b64(cert).expect("should be a valid certificate");
-    let cert_hash = cert::hash_to_b64(cert.hash());
-    info!("************************");
-    info!("SPKI FINGERPRINT");
-    info!("  {spki_fingerprint}");
-    info!("CERTIFICATE HASH");
-    info!("  {cert_hash}");
-    info!("************************");
-
-    let config = web_transport_config(identity, &args);
     let server = commands
         .spawn((
-            Name::new("WebTransport Server"),
+            Name::new("Steam Dedicated Server"),
             // IMPORTANT
             //
             // Make sure to insert this component into your server entity,
             // so that `aeronet_replicon` knows you want to use this for `bevy_replicon`!
             AeronetRepliconServer,
         ))
-        .queue(WebTransportServer::open(config))
+        .queue(SteamNetDedicatedServer::open(
+            SessionConfig::default(),
+            target,
+        ))
         .id();
-    info!("Opening WebTransport server {server}");
+    info!("Opening Steam dedicated server {server}");
 }
 
-type WebTransportServerConfig = aeronet_webtransport::server::ServerConfig;
-
-fn web_transport_config(identity: wtransport::Identity, args: &Args) -> WebTransportServerConfig {
-    WebTransportServerConfig::builder()
-        .with_bind_default(args.wt_port)
-        .with_identity(identity)
-        .keep_alive_interval(Some(Duration::from_secs(1)))
-        .max_idle_timeout(Some(Duration::from_secs(5)))
-        .expect("should be a valid idle timeout")
-        .build()
+fn on_opened(trigger: On<Add, Server>, servers: Query<&LocalAddr>) {
+    let server = trigger.event_target();
+    if let Ok(local_addr) = servers.get(server) {
+        info!("{server} opened on {:?}", **local_addr);
+    } else {
+        info!("{server} opened for peer connections");
+    }
 }
 
 fn on_session_request(mut request: On<SessionRequest>, clients: Query<&ChildOf>) {
@@ -128,52 +148,14 @@ fn on_session_request(mut request: On<SessionRequest>, clients: Query<&ChildOf>)
         return;
     };
 
-    info!("{client} connecting to {server} with headers:");
-    for (header_key, header_value) in &request.headers {
-        info!("  {header_key}: {header_value}");
-    }
-
+    info!(
+        "{client} connecting to {server} with Steam ID {:?}",
+        request.steam_id
+    );
     request.respond(SessionResponse::Accepted);
 }
 
-//
-// WebSocket
-//
-
-type WebSocketServerConfig = aeronet_websocket::server::ServerConfig;
-
-fn open_web_socket_server(mut commands: Commands, args: Res<Args>) {
-    let config = web_socket_config(&args);
-    let server = commands
-        .spawn((Name::new("WebSocket Server"), AeronetRepliconServer))
-        .queue(WebSocketServer::open(config))
-        .id();
-    info!("Opening WebSocket server {server}");
-}
-
-fn web_socket_config(args: &Args) -> WebSocketServerConfig {
-    WebSocketServerConfig::builder()
-        .with_bind_default(args.ws_port)
-        .with_no_encryption()
-}
-
-//
-// server logic
-//
-
-fn on_opened(trigger: On<Add, Server>, servers: Query<&LocalAddr>) {
-    let server = trigger.event_target();
-    let local_addr = servers
-        .get(server)
-        .expect("opened server should have a binding socket `LocalAddr`");
-    info!("{server} opened on {}", **local_addr);
-}
-
-fn on_connected(
-    trigger: On<Add, Session>,
-    clients: Query<&ChildOf>,
-    mut commands: Commands,
-) {
+fn on_connected(trigger: On<Add, Session>, clients: Query<&ChildOf>, mut commands: Commands) {
     let client = trigger.event_target();
     let Ok(&ChildOf(server)) = clients.get(client) else {
         return;

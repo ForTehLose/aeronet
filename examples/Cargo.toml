@@ -11,11 +11,9 @@ publish = false
 [dependencies]
 aeronet = { workspace = true, features = ["visualizer"] }
 aeronet_replicon = { workspace = true, features = ["client", "server"] }
-aeronet_websocket = { workspace = true, features = ["client", "server"] }
-aeronet_webtransport = { workspace = true, features = [
+aeronet_steam = { workspace = true, features = [
   "client",
-  "dangerous-configuration",
-  "server",
+  "dedicated_server",
 ] }
 bevy = { workspace = true }
 bevy_egui = { workspace = true }
@@ -23,6 +21,7 @@ bevy_replicon = { workspace = true }
 cfg-if = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }
+steamworks = { workspace = true }
 
 [lints]
 workspace = true

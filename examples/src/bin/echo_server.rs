@@ -1,16 +1,21 @@
 //! Server which listens for client connections, and echoes back the UTF-8
 //! strings that they send.
 //!
-//! This example shows you how to create a server, accept client connections,
-//! and handle incoming messages. This example uses:
-//! - `aeronet_websocket` as the IO layer, using WebSockets under the hood. This
-//!   is what actually receives and sends packets of `[u8]`s across the network.
+//! This example shows you how to create a dedicated server, accept client
+//! connections, and handle incoming messages. This example uses:
+//! - `aeronet_steam` as the IO layer, using a Steam dedicated server under the
+//!   hood. This is what actually receives and sends packets of `[u8]`s across
+//!   the network.
 //! - `aeronet_transport` as the transport layer, the default implementation.
 //!   This manages reliability, ordering, and fragmentation of packets - meaning
 //!   that all you have to worry about is the actual data payloads that you want
 //!   to receive and send.
 //!
 //! This example is designed to work with the `echo_client` example.
+//!
+//! This example requires Steam to be running, and uses the Spacewar test app
+//! ID (`480`), so it should work without owning any particular game. It only
+//! works natively, since `aeronet_steam` does not support WASM.
 
 // This is unfortunately required because of <https://github.com/rust-lang/cargo/issues/9208>
 // You won't need this in your own code
@@ -31,24 +36,62 @@ use {
         },
         transport::{AeronetTransportPlugin, Transport, lane::LaneKind},
     },
-    aeronet_websocket::server::{ServerConfig, WebSocketServer, WebSocketServerPlugin},
+    aeronet_steam::{
+        SessionConfig, SteamworksClient, SteamworksServer, SteamworksSockets,
+        dedicated_server::{
+            ListenTarget, SessionRequest, SessionResponse, SteamNetDedicatedServer,
+            SteamNetDedicatedServerPlugin,
+        },
+    },
     bevy::{log::LogPlugin, prelude::*},
+    core::net::{Ipv4Addr, SocketAddr},
 };
 
 // Let's set up the app.
 
 fn main() -> AppExit {
+    // Set up a Steam dedicated server. Unlike a regular Steam client, this
+    // logs on anonymously and doesn't require a Steam user to be signed in.
+    let (server, server_callbacks) = steamworks::Server::init(
+        Ipv4Addr::UNSPECIFIED,
+        GAME_PORT,
+        QUERY_PORT,
+        steamworks::ServerMode::Authentication,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .expect("failed to initialize steam server");
+
+    server.set_product("aeronet-echo");
+    server.set_game_description("aeronet echo example");
+    server.set_server_name("aeronet echo server");
+    server.set_dedicated_server(true);
+    server.log_on_anonymous();
+    server.enable_heartbeats(true);
+
+    server_callbacks
+        .networking_utils()
+        .init_relay_network_access();
+
+    let socket_provider = SteamworksSockets::Server(SteamworksServer(server.clone()));
+
     App::new()
+        .insert_resource(SteamworksServer(server))
+        .insert_resource(SteamworksClient(server_callbacks))
+        .insert_resource(socket_provider)
+        // Steam callbacks must be pumped every frame for the IO layer to work.
+        .add_systems(PreUpdate, |steam: Res<SteamworksClient>| {
+            steam.run_callbacks();
+        })
         .add_plugins((
             // Core Bevy plugins.
             LogPlugin::default(),
             MinimalPlugins,
-            // We're using WebSockets, so we add this plugin.
+            // We're using a Steam dedicated server, so we add this plugin.
             // This will automatically add `AeronetIoPlugin` as well, which sets
             // up the IO layer. However, it does *not* set up the transport
             // layer (since technically, you may want to swap it out and use
             // your own).
-            WebSocketServerPlugin,
+            SteamNetDedicatedServerPlugin,
             // Here we actually set up the transport layer.
             AeronetTransportPlugin,
         ))
@@ -58,14 +101,16 @@ fn main() -> AppExit {
         .add_systems(Update, echo_messages)
         // Set up some observers to run when the server or client state changes.
         .add_observer(on_opened)
+        .add_observer(on_session_request)
         .add_observer(on_connected)
         .add_observer(on_disconnected)
         .run()
 }
 
-// Use a fixed listen port for this example, mapping to the URL that the
+// Use fixed ports for this example, mapping to the address that the
 // `echo_client` connects to.
-const LISTEN_PORT: u16 = 25570;
+const GAME_PORT: u16 = 25572;
+const QUERY_PORT: u16 = 27016;
 
 // Define what `aeronet_transport` lanes will be used on client connections.
 // When using the transport layer, you must define in advance what lanes will be
@@ -75,24 +120,19 @@ const LISTEN_PORT: u16 = 25570;
 const LANES: [LaneKind; 1] = [LaneKind::ReliableOrdered];
 
 fn setup(mut commands: Commands) {
-    // Let's set up our WebSocket server.
+    // Let's set up our Steam dedicated server socket, listening on a plain
+    // socket address (rather than only accepting Steam peer-to-peer
+    // connections).
+    let target = ListenTarget::Addr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), GAME_PORT));
 
-    // First we need to handle encryption. For this, we generate some
-    // self-signed certificates to identify ourselves.
-    // Clients won't be able to connect to our server with self-signed certs
-    // unless they disable cert validation (the demo client does this).
-    let identity =
-        aeronet_websocket::server::Identity::self_signed(["localhost", "127.0.0.1", "::1"])
-            .expect("all given SANs should be valid DNS names");
-
-    let config = ServerConfig::builder()
-        .with_bind_default(LISTEN_PORT)
-        .with_identity(identity);
     // Spawn an entity to represent this server.
     let mut server = commands.spawn_empty();
     // Make an `EntityCommand` via `open`, which will set up and open this
     // server.
-    server.queue(WebSocketServer::open(config));
+    server.queue(SteamNetDedicatedServer::open(
+        SessionConfig::default(),
+        target,
+    ));
 }
 
 // Observe state change events using `Trigger`s
@@ -104,12 +144,20 @@ fn on_opened(trigger: On<Add, Server>, servers: Query<&LocalAddr>) {
     info!("{server} opened on {}", **local_addr);
 }
 
-fn on_connected(
-    trigger: On<Add, Session>,
-    sessions: Query<&Session>,
-    clients: Query<&ChildOf>,
-    mut commands: Commands,
-) {
+fn on_session_request(mut request: On<SessionRequest>, clients: Query<&ChildOf>) {
+    let client = request.event_target();
+    let Ok(&ChildOf(server)) = clients.get(client) else {
+        return;
+    };
+
+    info!(
+        "{client} connecting to {server} with Steam ID {:?}",
+        request.steam_id
+    );
+    request.respond(SessionResponse::Accepted);
+}
+
+fn on_connected(trigger: On<Add, Session>, sessions: Query<&Session>, clients: Query<&ChildOf>, mut commands: Commands) {
     let client = trigger.event_target();
     let session = sessions
         .get(client)

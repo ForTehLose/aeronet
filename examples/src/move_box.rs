@@ -4,13 +4,15 @@
 //! Box positions are synced between clients and servers using [`bevy_replicon`]
 //! with the [`aeronet_replicon`] backend.
 //!
-//! This example currently runs the following IO layers at once:
-//! - [`aeronet_websocket`] on port `25570`
-//! - [`aeronet_webtransport`] on port `25571`
+//! This example uses [`aeronet_steam`] as its IO layer, with the server
+//! hosting a Steam dedicated server (via [`aeronet_steam::dedicated_server`]).
 //!
 //! Based on <https://github.com/projectharmonia/bevy_replicon_renet/blob/master/examples/simple_box.rs>.
 //!
 //! # Usage
+//!
+//! This example requires Steam to be running, and uses the Spacewar test
+//! app ID (`480`), so it should work without owning any particular game.
 //!
 //! ## Server
 //!
@@ -20,72 +22,14 @@
 //!
 //! ## Client
 //!
-//! Native:
-//!
 //! ```sh
 //! cargo run --bin move_box_client
 //! ```
 //!
-//! WASM:
+//! Steam dedicated servers don't run under WASM, so this example is
+//! native-only.
 //!
-//! ```sh
-//! cargo install wasm-server-runner
-//! cargo run --bin move_box_client --target wasm32-unknown-unknown
-//! ```
-//!
-//! You must use a Chromium browser to try the demo:
-//! - Currently, the WASM client demo doesn't run on Firefox, due to an issue
-//!   with how `xwt` handles getting the reader for the incoming datagram
-//!   stream. This results in the backend task erroring whenever a connection
-//!   starts.
-//! - WebTransport is not supported on Safari.
-//!
-//! Eventually, when Firefox is supported but you still have problems running
-//! the client under Firefox (especially LibreWolf), check:
-//! - `privacy.resistFingerprinting` is disabled, or Enhanced Tracking
-//!   Protection is disabled for the website (see [winit #3345])
-//! - `webgl.disabled` is set to `false`, so that Bevy can use the GPU
-//!
-//! [winit #3345]: https://github.com/rust-windowing/winit/issues/3345
-//!
-//! ## Connecting
-//!
-//! ### WebTransport
-//!
-//! The server binds to `0.0.0.0` by default. To connect to the server from the
-//! client, you must specify an HTTPS address. For a local server, this will be
-//! `https://[::1]:PORT`.
-//!
-//! By default, you will not be able to connect to the server, because it uses a
-//! self-signed certificate which your client (native or browser) will treat as
-//! invalid. To get around this, you must manually provide SHA-256 digest of the
-//! certificate's DER as a base 64 string.
-//!
-//! When starting the server, it outputs the *certificate hash* as a base 64
-//! string (it also outputs the *SPKI fingerprint*, which is different and is
-//! not necessary here). Copy this string and enter it into the "certificate
-//! hash" field of the client before connecting. The client will then ignore
-//! certificate validation errors for this specific certificate, and allow a
-//! connection to be established.
-//!
-//! In the browser, egui may not let you paste in the hash. You can get around
-//! this by:
-//! 1. clicking into the certificate hash text box
-//! 2. clicking outside of the bevy window (i.e. into the white space)
-//! 3. pressing Ctrl+V
-//!
-//! In the native client, if you leave the certificate hash field blank, the
-//! client will simply not validate certificates. **This is dangerous** and
-//! should not be done in your actual app, which is why it's locked behind the
-//! `dangerous-configuration` flag, but is done for convenience in this example.
-//!
-//! ### WebSocket
-//!
-//! The server binds to `0.0.0.0` without encryption. You will need to connect
-//! using a URL which uses the `ws` protocol (not `wss`).
-//!
-//! [`aeronet_webtransport`]: https://docs.rs/aeronet_webtransport
-//! [`aeronet_websocket`]: https://docs.rs/aeronet_websocket
+//! [`aeronet_steam`]: https://docs.rs/aeronet_steam
 //! [`bevy_replicon`]: https://docs.rs/bevy_replicon
 //! [`aeronet_replicon`]: https://docs.rs/aeronet_replicon
 
@@ -95,11 +39,17 @@ use {
     serde::{Deserialize, Serialize},
 };
 
-/// Port to run the WebSocket server on.
-pub const WEB_SOCKET_PORT: u16 = 25570;
+/// Steam app ID used to initialize Steamworks.
+///
+/// This is the Spacewar test app, freely usable for testing Steamworks
+/// integrations.
+pub const STEAM_APP_ID: u32 = 480;
 
-/// Port to run the WebTransport server.
-pub const WEB_TRANSPORT_PORT: u16 = 25571;
+/// Port that the Steam dedicated server listens for game connections on.
+pub const STEAM_GAME_PORT: u16 = 25572;
+
+/// Port that the Steam dedicated server uses for master server queries.
+pub const STEAM_QUERY_PORT: u16 = 27016;
 
 /// How many units a player may move in a single second.
 const MOVE_SPEED: f32 = 250.0;

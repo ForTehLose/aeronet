@@ -1,5 +1,12 @@
 //! See `src/move_box.rs`.
 
+cfg_if::cfg_if! {
+    if #[cfg(target_family = "wasm")] {
+        fn main() {
+            panic!("not supported on WASM");
+        }
+    } else {
+
 use {
     aeronet::{
         io::{
@@ -12,29 +19,39 @@ use {
         },
     },
     aeronet_replicon::client::{AeronetRepliconClient, AeronetRepliconClientPlugin},
-    aeronet_websocket::client::{WebSocketClient, WebSocketClientPlugin},
-    aeronet_webtransport::{
-        cert,
-        client::{WebTransportClient, WebTransportClientPlugin},
+    aeronet_steam::{
+        SessionConfig, SteamworksClient, SteamworksSockets,
+        client::{ConnectTarget, SteamNetClient, SteamNetClientPlugin},
     },
-    bevy::{ecs::query::QuerySingleError, prelude::*},
+    bevy::prelude::*,
     bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui},
     bevy_replicon::prelude::*,
+    core::net::SocketAddr,
     examples::move_box::{
-        GameState, MoveBoxPlugin, PlayerColor, PlayerInput, PlayerPosition, WEB_SOCKET_PORT,
-        WEB_TRANSPORT_PORT,
+        GameState, MoveBoxPlugin, PlayerColor, PlayerInput, PlayerPosition, STEAM_APP_ID,
+        STEAM_GAME_PORT,
     },
+    steamworks::SteamId,
 };
 
 fn main() -> AppExit {
+    let steam = steamworks::Client::init_app(STEAM_APP_ID).expect("failed to initialize steam");
+    steam.networking_utils().init_relay_network_access();
+
+    let socket_provider = SteamworksSockets::Client(SteamworksClient(steam.clone()));
+
     App::new()
+        .insert_resource(SteamworksClient(steam))
+        .insert_resource(socket_provider)
+        .add_systems(PreUpdate, |steam: Res<SteamworksClient>| {
+            steam.run_callbacks();
+        })
         .add_plugins((
             // core
             DefaultPlugins,
             EguiPlugin::default(),
             // transport
-            WebTransportClientPlugin,
-            WebSocketClientPlugin,
+            SteamNetClientPlugin,
             SessionVisualizerPlugin,
             // replication
             RepliconPlugins,
@@ -43,17 +60,13 @@ fn main() -> AppExit {
             MoveBoxPlugin,
         ))
         .init_resource::<GlobalUi>()
-        .init_resource::<WebTransportUi>()
-        .init_resource::<WebSocketUi>()
+        .init_resource::<SteamUi>()
         .add_systems(Startup, setup_ui)
         .add_systems(
             Update,
             (draw_boxes, handle_inputs).run_if(in_state(GameState::Playing)),
         )
-        .add_systems(
-            EguiPrimaryContextPass,
-            (web_transport_ui, web_socket_ui, global_ui).chain(),
-        )
+        .add_systems(EguiPrimaryContextPass, (steam_ui, global_ui).chain())
         .add_observer(on_connecting)
         .add_observer(on_connected)
         .add_observer(on_disconnected)
@@ -67,14 +80,9 @@ struct GlobalUi {
 }
 
 #[derive(Debug, Default, Resource)]
-struct WebTransportUi {
-    target: String,
-    cert_hash: String,
-}
-
-#[derive(Debug, Default, Resource)]
-struct WebSocketUi {
-    target: String,
+struct SteamUi {
+    target_addr: String,
+    target_peer: String,
 }
 
 fn setup_ui(mut commands: Commands) {
@@ -194,10 +202,10 @@ fn global_ui(
                     commands.trigger(Disconnect::new(session, "pressed disconnect button"));
                 }
             }
-            Err(QuerySingleError::NoEntities(_)) => {
+            Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => {
                 ui.label("No sessions active");
             }
-            Err(QuerySingleError::MultipleEntities(_)) => {
+            Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
                 ui.label("Multiple sessions active");
             }
         }
@@ -213,169 +221,88 @@ fn global_ui(
 }
 
 //
-// WebTransport
+// Steam
 //
 
-fn web_transport_ui(
+fn steam_ui(
     mut commands: Commands,
     mut egui: EguiContexts,
     mut global_ui: ResMut<GlobalUi>,
-    mut ui_state: ResMut<WebTransportUi>,
+    mut ui_state: ResMut<SteamUi>,
     sessions: Query<(), With<Session>>,
 ) -> Result<(), BevyError> {
-    let default_target = format!("https://127.0.0.1:{WEB_TRANSPORT_PORT}");
+    let default_target = format!("127.0.0.1:{STEAM_GAME_PORT}");
 
-    egui::Window::new("WebTransport").show(egui.ctx_mut()?, |ui| {
+    egui::Window::new("Steam").show(egui.ctx_mut()?, |ui| {
         if sessions.iter().next().is_some() {
             ui.disable();
         }
 
         let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
 
-        let mut connect = false;
+        let mut connect_addr = false;
         ui.horizontal(|ui| {
-            let connect_resp = ui.add(
-                egui::TextEdit::singleline(&mut ui_state.target)
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut ui_state.target_addr)
                     .hint_text(format!("{default_target} | [enter] to connect")),
             );
-            connect |= connect_resp.lost_focus() && enter_pressed;
-            connect |= ui.button("Connect").clicked();
+            connect_addr |= resp.lost_focus() && enter_pressed;
+            connect_addr |= ui.button("Connect to address").clicked();
         });
 
-        let cert_hash_resp = ui.add(
-            egui::TextEdit::singleline(&mut ui_state.cert_hash)
-                .hint_text("(optional) certificate hash"),
-        );
-        connect |= cert_hash_resp.lost_focus() && enter_pressed;
+        let mut connect_peer = false;
+        ui.horizontal(|ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut ui_state.target_peer)
+                    .hint_text("Steam ID | [enter] to connect"),
+            );
+            connect_peer |= resp.lost_focus() && enter_pressed;
+            connect_peer |= ui.button("Connect to Steam ID").clicked();
+        });
 
-        if connect {
-            let mut target = ui_state.target.clone();
+        if connect_addr {
+            let mut target = ui_state.target_addr.clone();
             if target.is_empty() {
                 target = default_target;
             }
 
-            let cert_hash = ui_state.cert_hash.clone();
-            let config = web_transport_config(cert_hash);
+            match target.parse::<SocketAddr>() {
+                Ok(target) => {
+                    global_ui.session_id += 1;
+                    let name = format!("{}. {target}", global_ui.session_id);
+                    commands
+                        .spawn(Name::new(name))
+                        .queue(SteamNetClient::connect(SessionConfig::default(), target));
+                }
+                Err(err) => {
+                    global_ui.log.push(format!("Invalid address `{target}`: {err:?}"));
+                }
+            }
+        }
 
-            global_ui.session_id += 1;
-            let name = format!("{}. {target}", global_ui.session_id);
-            commands
-                .spawn(Name::new(name))
-                .queue(WebTransportClient::connect(config, target));
+        if connect_peer {
+            let target = ui_state.target_peer.clone();
+
+            match target.parse::<u64>() {
+                Ok(target) => {
+                    let target = SteamId::from_raw(target);
+                    global_ui.session_id += 1;
+                    let name = format!("{}. {target:?}", global_ui.session_id);
+                    commands.spawn(Name::new(name)).queue(SteamNetClient::connect(
+                        SessionConfig::default(),
+                        ConnectTarget::from(target),
+                    ));
+                }
+                Err(err) => {
+                    global_ui
+                        .log
+                        .push(format!("Invalid Steam ID `{target}`: {err:?}"));
+                }
+            }
         }
     });
 
     Ok(())
-}
-
-type WebTransportClientConfig = aeronet_webtransport::client::ClientConfig;
-
-#[cfg(target_family = "wasm")]
-fn web_transport_config(cert_hash: String) -> WebTransportClientConfig {
-    use aeronet_webtransport::xwt_web::{CertificateHash, HashAlgorithm};
-
-    let server_certificate_hashes = match cert::hash_from_b64(&cert_hash) {
-        Ok(hash) => vec![CertificateHash {
-            algorithm: HashAlgorithm::Sha256,
-            value: Vec::from(hash),
-        }],
-        Err(err) => {
-            warn!("Failed to read certificate hash from string: {err:?}");
-            Vec::new()
-        }
-    };
-
-    WebTransportClientConfig {
-        server_certificate_hashes,
-        ..Default::default()
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn web_transport_config(cert_hash: String) -> WebTransportClientConfig {
-    use {aeronet_webtransport::wtransport::tls::Sha256Digest, core::time::Duration};
-
-    let config = WebTransportClientConfig::builder().with_bind_default();
-
-    let config = if cert_hash.is_empty() {
-        warn!("Connecting without certificate validation");
-        config.with_no_cert_validation()
-    } else {
-        match cert::hash_from_b64(&cert_hash) {
-            Ok(hash) => config.with_server_certificate_hashes([Sha256Digest::new(hash)]),
-            Err(err) => {
-                warn!("Failed to read certificate hash from string: {err:?}");
-                config.with_server_certificate_hashes([])
-            }
-        }
-    };
-
-    config
-        .keep_alive_interval(Some(Duration::from_secs(1)))
-        .max_idle_timeout(Some(Duration::from_secs(5)))
-        .expect("should be a valid idle timeout")
-        .build()
-}
-
-//
-// WebSocket
-//
-
-fn web_socket_ui(
-    mut commands: Commands,
-    mut egui: EguiContexts,
-    mut global_ui: ResMut<GlobalUi>,
-    mut ui_state: ResMut<WebSocketUi>,
-    sessions: Query<(), With<Session>>,
-) -> Result<(), BevyError> {
-    let default_target = format!("ws://127.0.0.1:{WEB_SOCKET_PORT}");
-
-    egui::Window::new("WebSocket").show(egui.ctx_mut()?, |ui| {
-        if sessions.iter().next().is_some() {
-            ui.disable();
-        }
-
-        let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
-
-        let mut connect = false;
-        ui.horizontal(|ui| {
-            let connect_resp = ui.add(
-                egui::TextEdit::singleline(&mut ui_state.target)
-                    .hint_text(format!("{default_target} | [enter] to connect")),
-            );
-            connect |= connect_resp.lost_focus() && enter_pressed;
-            connect |= ui.button("Connect").clicked();
-        });
-
-        if connect {
-            let mut target = ui_state.target.clone();
-            if target.is_empty() {
-                target = default_target;
-            }
-
-            let config = web_socket_config();
-
-            global_ui.session_id += 1;
-            let name = format!("{}. {target}", global_ui.session_id);
-            commands
-                .spawn(Name::new(name))
-                .queue(WebSocketClient::connect(config, target));
-        }
-    });
-
-    Ok(())
-}
-
-type WebSocketClientConfig = aeronet_websocket::client::ClientConfig;
-
-#[cfg(target_family = "wasm")]
-fn web_socket_config() -> WebSocketClientConfig {
-    WebSocketClientConfig::default()
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn web_socket_config() -> WebSocketClientConfig {
-    WebSocketClientConfig::builder().with_no_cert_validation()
 }
 
 //
@@ -406,3 +333,5 @@ fn draw_boxes(mut gizmos: Gizmos, players: Query<(&PlayerPosition, &PlayerColor)
         gizmos.rect_2d(*pos, Vec2::ONE * 50.0, *color);
     }
 }
+
+}}
