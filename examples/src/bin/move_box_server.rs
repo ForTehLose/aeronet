@@ -58,11 +58,11 @@ fn main() -> AppExit {
     let args = <Args as clap::Parser>::parse();
 
     let (server, server_callbacks) = steamworks::Server::init(
-        Ipv4Addr::LOCALHOST,
-        args.game_port,
-        args.query_port,
-        steamworks::ServerMode::AuthenticationAndSecure,
-        env!("CARGO_PKG_VERSION"),
+            Ipv4Addr::LOCALHOST,
+            25572,
+            27016,
+            steamworks::ServerMode::AuthenticationAndSecure,
+            "1.0.0.0",
     )
     .expect("failed to initialize steam server");
 
@@ -123,7 +123,18 @@ fn main() -> AppExit {
         })
         .add_plugins((
             // core
-            LogPlugin::default(),
+            LogPlugin {
+                // Surface `aeronet_steam`/`aeronet_transport`'s internal
+                // `debug!`/`trace!` logging (connection state changes, real
+                // Steam-level disconnect reasons, packet send/recv counts)
+                // which is silent at the default `info` level. Useful when
+                // diagnosing unexpected disconnects.
+                filter: format!(
+                    "{},aeronet_steam=debug,aeronet_transport=debug",
+                    bevy::log::DEFAULT_FILTER
+                ),
+                ..default()
+            },
             MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
                 1.0 / f64::from(TICK_RATE),
             ))),

@@ -65,6 +65,8 @@ pub struct BrowserServer {
     pub bots: i32,
     /// Round-trip ping to the server, as measured by Steam.
     pub ping_ms: u64,
+    /// Steam ID of the server itself (not any connected player).
+    pub steam_id: u64,
     /// Address clients should connect to.
     pub addr: SocketAddrV4,
     /// Whether the server is password-protected.
@@ -87,6 +89,7 @@ impl From<GameServerItem> for BrowserServer {
                 reason = "ping should never realistically overflow a u64 of milliseconds"
             )]
             ping_ms: item.ping.as_millis() as u64,
+            steam_id: item.steamid,
             addr: SocketAddrV4::new(item.addr, item.connection_port),
             has_password: item.have_password,
             secure: item.secure,
@@ -251,6 +254,7 @@ fn server_list_ui(ui: &mut egui::Ui, grid_id: &str, query: &ServerQuery) {
                     ui.strong("Players");
                     ui.strong("Ping");
                     ui.strong("Address");
+                    ui.strong("Steam ID");
                     ui.end_row();
 
                     for server in servers.iter() {
@@ -266,6 +270,7 @@ fn server_list_ui(ui: &mut egui::Ui, grid_id: &str, query: &ServerQuery) {
                         ));
                         ui.label(format!("{}ms", server.ping_ms));
                         ui.label(server.addr.to_string());
+                        ui.label(server.steam_id.to_string());
                         ui.end_row();
                     }
                 });

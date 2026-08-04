@@ -15,6 +15,7 @@ use {
         },
         transport::{
             TransportConfig,
+            sampling::SessionStats,
             visualizer::{SessionVisualizer, SessionVisualizerPlugin},
         },
     },
@@ -23,7 +24,7 @@ use {
         SessionConfig, SteamworksClient, SteamworksSockets,
         client::{ConnectTarget, SteamNetClient, SteamNetClientPlugin},
     },
-    bevy::prelude::*,
+    bevy::{log::LogPlugin, prelude::*},
     bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui},
     bevy_replicon::prelude::*,
     core::net::SocketAddr,
@@ -48,7 +49,18 @@ fn main() -> AppExit {
         })
         .add_plugins((
             // core
-            DefaultPlugins,
+            DefaultPlugins.set(LogPlugin {
+                // Surface `aeronet_steam`/`aeronet_transport`'s internal
+                // `debug!`/`trace!` logging (connection state changes, real
+                // Steam-level disconnect reasons, packet send/recv counts)
+                // which is silent at the default `info` level. Useful when
+                // diagnosing unexpected disconnects.
+                filter: format!(
+                    "{},aeronet_steam=debug,aeronet_transport=debug",
+                    bevy::log::DEFAULT_FILTER
+                ),
+                ..default()
+            }),
             EguiPlugin::default(),
             // transport
             SteamNetClientPlugin,
@@ -64,7 +76,7 @@ fn main() -> AppExit {
         .add_systems(Startup, setup_ui)
         .add_systems(
             Update,
-            (draw_boxes, handle_inputs).run_if(in_state(GameState::Playing)),
+            (draw_boxes, handle_inputs, log_session_stats).run_if(in_state(GameState::Playing)),
         )
         .add_systems(EguiPrimaryContextPass, (steam_ui, global_ui).chain())
         .add_observer(on_connecting)
@@ -147,7 +159,7 @@ fn on_disconnected(
     let name = names
         .get(session)
         .expect("our session entity should have a name");
-    ui_state.log.push(match &trigger.reason {
+    let message = match &trigger.reason {
         DisconnectReason::ByUser(reason) => {
             format!("{name} disconnected by user: {reason}")
         }
@@ -157,7 +169,12 @@ fn on_disconnected(
         DisconnectReason::ByError(err) => {
             format!("{name} disconnected due to error: {err:#}")
         }
-    });
+    };
+    // Also log to the console/log file, not just the egui window - this is
+    // the reason the disconnect actually happened, and it's easy to miss in
+    // the UI if the app closes or you're not watching it at the time.
+    warn!("{message}");
+    ui_state.log.push(message);
     game_state.set(GameState::None);
 }
 
@@ -331,6 +348,43 @@ fn handle_inputs(mut inputs: MessageWriter<PlayerInput>, input: Res<ButtonInput<
 fn draw_boxes(mut gizmos: Gizmos, players: Query<(&PlayerPosition, &PlayerColor)>) {
     for (PlayerPosition(pos), PlayerColor(color)) in &players {
         gizmos.rect_2d(*pos, Vec2::ONE * 50.0, *color);
+    }
+}
+
+//
+// diagnostics
+//
+
+/// Periodically logs RTT/packet-loss/throughput for the active session, so
+/// you can see the connection quality trending downward (or an abrupt
+/// silence) in the seconds leading up to an unexpected disconnect - rather
+/// than only finding out after the fact from the disconnect reason alone.
+fn log_session_stats(
+    time: Res<Time>,
+    mut since_last_log: Local<f32>,
+    sessions: Query<(&Name, &SessionStats), With<Session>>,
+) {
+    const LOG_INTERVAL_SECS: f32 = 1.0;
+
+    *since_last_log += time.delta_secs();
+    if *since_last_log < LOG_INTERVAL_SECS {
+        return;
+    }
+    *since_last_log = 0.0;
+
+    for (name, stats) in &sessions {
+        let Some(sample) = stats.last() else {
+            continue;
+        };
+        info!(
+            "{name}: RTT {:.0}ms, loss {:.1}%, sent {} / recv {} packets ({} / {} bytes)",
+            sample.msg_rtt.as_secs_f64() * 1000.0,
+            sample.loss * 100.0,
+            sample.packets_delta.packets_sent,
+            sample.packets_delta.packets_recv,
+            sample.packets_delta.bytes_sent,
+            sample.packets_delta.bytes_recv,
+        );
     }
 }
 
