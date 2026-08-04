@@ -29,7 +29,7 @@ use {
     core::net::SocketAddr,
     examples::move_box::{
         GameState, MoveBoxPlugin, PlayerColor, PlayerInput, PlayerPosition, STEAM_APP_ID,
-        STEAM_GAME_PORT,
+        STEAM_NET_PORT,
     },
     steamworks::SteamId,
 };
@@ -231,7 +231,7 @@ fn steam_ui(
     mut ui_state: ResMut<SteamUi>,
     sessions: Query<(), With<Session>>,
 ) -> Result<(), BevyError> {
-    let default_target = format!("127.0.0.1:{STEAM_GAME_PORT}");
+    let default_target = format!("127.0.0.1:{STEAM_NET_PORT}");
 
     egui::Window::new("Steam").show(egui.ctx_mut()?, |ui| {
         if sessions.iter().next().is_some() {

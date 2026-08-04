@@ -32,7 +32,7 @@ use {
     },
     examples::move_box::{
         MoveBoxPlugin, Player, PlayerColor, PlayerInput, PlayerPosition, STEAM_GAME_PORT,
-        STEAM_QUERY_PORT, TICK_RATE,
+        STEAM_NET_PORT, STEAM_QUERY_PORT, TICK_RATE,
     },
     std::time::SystemTime,
 };
@@ -46,25 +46,37 @@ struct Args {
     /// Port used for Steam master server queries
     #[arg(long, default_value_t = STEAM_QUERY_PORT)]
     query_port: u16,
+    /// Port that the actual game socket listens on for client connections
+    ///
+    /// Must be different from `game_port`/`query_port` - see
+    /// [`STEAM_NET_PORT`] for why.
+    #[arg(long, default_value_t = STEAM_NET_PORT)]
+    net_port: u16,
 }
 
 fn main() -> AppExit {
     let args = <Args as clap::Parser>::parse();
 
     let (server, server_callbacks) = steamworks::Server::init(
-        Ipv4Addr::UNSPECIFIED,
+        Ipv4Addr::LOCALHOST,
         args.game_port,
         args.query_port,
-        steamworks::ServerMode::Authentication,
+        steamworks::ServerMode::AuthenticationAndSecure,
         env!("CARGO_PKG_VERSION"),
     )
     .expect("failed to initialize steam server");
 
-    server.set_product("aeronet-move-box");
-    server.set_game_description("aeronet move_box example");
-    server.set_map_name("move_box");
-    server.set_max_players(16);
-    server.set_server_name("aeronet move_box server");
+    // server.set_product("480");
+    // server.set_game_description("spacewar");
+    // server.set_map_name("move_box");
+    // server.set_max_players(16);
+    // server.set_server_name("aeronet move_box server");
+    server.set_game_description("Description");
+        server.set_mod_dir("spacewar");
+        server.set_product("spacewar");
+        server.set_map_name("island");
+        server.set_max_players(16);
+        server.set_server_name("Some Server");
     server.set_dedicated_server(true);
     server.log_on_anonymous();
     server.enable_heartbeats(true);
@@ -72,6 +84,29 @@ fn main() -> AppExit {
     server_callbacks
         .networking_utils()
         .init_relay_network_access();
+
+    // The game server's log-on to Steam (needed for the server browser
+    // heartbeat to work) happens asynchronously. Register callbacks so we get
+    // clear, unmissable feedback on whether it actually succeeded - if you
+    // never see "connected to Steam", the server will never appear in the
+    // browser regardless of anything else in this file.
+    // We deliberately leak the handles: they just need to live for the
+    // program's lifetime.
+    Box::leak(Box::new(server_callbacks.register_callback(
+        |event: steamworks::SteamServersConnected| {
+            info!("Game server connected to Steam: {event:?}");
+        },
+    )));
+    Box::leak(Box::new(server_callbacks.register_callback(
+        |event: steamworks::SteamServerConnectFailure| {
+            warn!("Game server FAILED to connect to Steam: {event:?}");
+        },
+    )));
+    Box::leak(Box::new(server_callbacks.register_callback(
+        |event: steamworks::SteamServersDisconnected| {
+            warn!("Game server disconnected from Steam: {event:?}");
+        },
+    )));
 
     let steam_id = server.steam_id();
     info!("Steam server ID: {steam_id:?}");
@@ -114,7 +149,8 @@ fn main() -> AppExit {
 }
 
 fn open_server(mut commands: Commands, args: Res<Args>) {
-    let target = ListenTarget::Addr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), args.game_port));
+    // let target = ListenTarget::Addr(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), args.net_port));
+    let target = ListenTarget::Peer { virtual_port: 0 };
 
     let server = commands
         .spawn((

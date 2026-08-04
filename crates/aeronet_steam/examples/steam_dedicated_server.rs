@@ -52,6 +52,30 @@ fn main() -> AppExit {
 
     server_callbacks.networking_utils().init_relay_network_access();
 
+
+    // The game server's log-on to Steam (needed for the server browser
+    // heartbeat to work) happens asynchronously. Register callbacks so we get
+    // clear, unmissable feedback on whether it actually succeeded - if you
+    // never see "connected to Steam", the server will never appear in the
+    // browser regardless of anything else in this file.
+    // We deliberately leak the handles: they just need to live for the
+    // program's lifetime.
+    Box::leak(Box::new(server_callbacks.register_callback(
+        |event: steamworks::SteamServersConnected| {
+            info!("Game server connected to Steam: {event:?}");
+        },
+    )));
+    Box::leak(Box::new(server_callbacks.register_callback(
+        |event: steamworks::SteamServerConnectFailure| {
+            warn!("Game server FAILED to connect to Steam: {event:?}");
+        },
+    )));
+    Box::leak(Box::new(server_callbacks.register_callback(
+        |event: steamworks::SteamServersDisconnected| {
+            warn!("Game server disconnected from Steam: {event:?}");
+        },
+    )));
+
     let id = server.steam_id();
     info!("steamid = : {:?}", id);
 

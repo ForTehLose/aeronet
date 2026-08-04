@@ -45,11 +45,28 @@ use {
 /// integrations.
 pub const STEAM_APP_ID: u32 = 480;
 
-/// Port that the Steam dedicated server listens for game connections on.
+/// Port registered with `ISteamGameServer` for game info, used by the Steam
+/// master server / server browser to identify this server.
+///
+/// This is *not* the port that clients actually connect to for gameplay
+/// traffic - see [`STEAM_NET_PORT`] for that.
 pub const STEAM_GAME_PORT: u16 = 25572;
 
 /// Port that the Steam dedicated server uses for master server queries.
 pub const STEAM_QUERY_PORT: u16 = 27016;
+
+/// Port that the [`aeronet_steam`] game socket (`SteamNetDedicatedServer`)
+/// actually listens on for client connections.
+///
+/// This must be different from [`STEAM_GAME_PORT`]/[`STEAM_QUERY_PORT`],
+/// since those are bound internally by `ISteamGameServer` for master server
+/// registration - reusing the same port number for both causes them to
+/// fight over the same OS socket, breaking the master server's ability to
+/// verify this server is alive (and therefore breaking Internet server
+/// browser visibility, even though direct/LAN connections still work).
+///
+/// [`aeronet_steam`]: https://docs.rs/aeronet_steam
+pub const STEAM_NET_PORT: u16 = 27015;
 
 /// How many units a player may move in a single second.
 const MOVE_SPEED: f32 = 250.0;
