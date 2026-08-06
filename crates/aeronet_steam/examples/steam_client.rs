@@ -1,6 +1,8 @@
 //! Example showing a Steam sockets client which can send and receive UTF-8
 //! strings.
 
+use aeronet_steam::SteamworksSockets;
+
 cfg_if::cfg_if! {
     if #[cfg(target_family = "wasm")] {
         fn main() {
@@ -27,8 +29,11 @@ fn main() -> AppExit {
     let steam = steamworks::Client::init_app(480).expect("failed to initialize steam");
     steam.networking_utils().init_relay_network_access();
 
+    let socket_provider = SteamworksSockets::Client(SteamworksClient(steam.clone()));
+
     App::new()
         .insert_resource(SteamworksClient(steam))
+        .insert_resource(socket_provider)
         .add_systems(PreUpdate, |steam: Res<SteamworksClient>| {
             steam.run_callbacks();
         })
